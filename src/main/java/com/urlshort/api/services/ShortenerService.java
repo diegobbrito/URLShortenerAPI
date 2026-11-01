@@ -1,11 +1,12 @@
 package com.urlshort.api.services;
 
 import com.urlshort.api.dto.ShortUrlResponse;
+import com.urlshort.api.models.ShortUrl;
+import com.urlshort.api.repositories.ShortUrlRepository;
 import java.net.URI;
 import java.security.SecureRandom;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -17,10 +18,13 @@ public class ShortenerService {
     private static final int SHORT_CODE_LENGTH = 7;
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    private final ConcurrentMap<String, String> urls = new ConcurrentHashMap<>();
+    private final ShortUrlRepository shortUrlRepository;
     private final String baseUrl;
 
-    public ShortenerService(@Value("${app.base-url:http://localhost:8080}") String baseUrl) {
+    public ShortenerService(
+            ShortUrlRepository shortUrlRepository,
+            @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
+        this.shortUrlRepository = shortUrlRepository;
         this.baseUrl = baseUrl.replaceAll("/+$", "");
     }
 
@@ -28,25 +32,34 @@ public class ShortenerService {
         validateUrl(originalUrl);
 
         String shortenedId;
-        do {
+        while (true) {
             shortenedId = generateShortenedId();
-        } while (urls.putIfAbsent(shortenedId, originalUrl) != null);
+            if (shortUrlRepository.existsById(shortenedId)) {
+                continue;
+            }
 
-        return new ShortUrlResponse(shortenedId, originalUrl, baseUrl + "/" + shortenedId);
+            try {
+                shortUrlRepository.save(new ShortUrl(shortenedId, originalUrl));
+                return new ShortUrlResponse(shortenedId, originalUrl, baseUrl + "/" + shortenedId);
+            } catch (DataIntegrityViolationException exception) {
+                if (!shortUrlRepository.existsById(shortenedId)) {
+                    throw exception;
+                }
+            }
+        }
     }
 
     public String getOriginalUrl(String shortenedId) {
-        String originalUrl = urls.get(shortenedId);
-        if (originalUrl == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "URL encurtada não encontrada");
-        }
-        return originalUrl;
+        return findShortUrl(shortenedId).getOriginalUrl();
     }
 
     public void deleteShortUrl(String shortenedId) {
-        if (urls.remove(shortenedId) == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "URL encurtada não encontrada");
-        }
+        shortUrlRepository.delete(findShortUrl(shortenedId));
+    }
+
+    private ShortUrl findShortUrl(String shortenedId) {
+        return shortUrlRepository.findById(shortenedId).orElseThrow(() ->
+                new ResponseStatusException(HttpStatus.NOT_FOUND, "URL encurtada não encontrada"));
     }
 
     private void validateUrl(String originalUrl) {
